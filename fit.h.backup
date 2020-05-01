@@ -1,0 +1,14 @@
+//
+// Created by grewwc on 26/12/2017.
+//
+#ifndef TWOLAYER_FIT_H
+#define TWOLAYER_FIT_H
+
+
+#include <vector>
+
+void fit(double *x, double *y, double f(double, const std::vector<double> &),
+         std::vector<double> &params, int max_time = 1000, bool any = false);
+
+
+#endif //TWOLAYER_FIT_H

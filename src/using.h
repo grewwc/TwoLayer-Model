@@ -1,0 +1,12 @@
+#pragma once
+#include <cmath>
+using std::pow;
+using std::exp;
+using std::log;
+using std::sin;
+using std::cos;
+using std::sqrt;
+using std::acos;
+using std::tan;
+using std::atan;
+using std::asin;

@@ -1,0 +1,309 @@
+#include "model.h"
+#include "Print.h"
+#include "wwcString.h"
+#include <cmath>
+#include <fstream>
+#include <iostream>
+#include <vector>
+#include <thread>
+#include <future>
+#include <algorithm>
+#include <numeric>
+#include <limits>
+#include <ios>
+#include <string>
+#include <sstream>
+#include <iomanip>
+
+
+#ifdef __linux__
+inline bool mynan(double test)
+{
+	return isnan(test);
+}
+inline bool myinf(double test)
+{
+	return isnan(test);
+}
+#elif _WIN32
+inline bool mynan(double test)
+{
+	return isnan<double>(test);
+}
+inline bool myinf(double test)
+{
+	return isnan<double>(test);
+}
+#elif __APPLE__
+inline bool mynan(double test)
+{
+	return isnan<double>(test);
+}
+#endif
+
+
+
+namespace log_helper
+{
+	std::ofstream f_log{ "/home/wwc129/Twolayer/log/fit.log", std::ios::out };
+	void _init()
+	{
+		if (!f_log.is_open())
+		{
+			std::cout << "cannot write to the log file" << std::endl;
+			exit(-1);
+		}
+	}
+}
+extern const int N;
+
+const double inverse_N = 1.0 / N;
+const double err = 1e-14;
+
+std::vector<double> velocity;
+
+namespace _helper
+{
+	inline double find_max(const std::vector<double>& params)
+	{
+		double ret = std::numeric_limits<double>::min();
+		for (const auto& e : params)
+		{
+			ret = ret < abs(e) ? abs(e) : ret;
+		}
+		return ret;
+	}
+
+	inline double find_min(const std::vector<double>& params)
+	{
+		double min = std::numeric_limits<double>().max();
+		for (const auto& e : params)
+		{
+			if (abs(e) < min)
+			{
+				min = e;
+			}
+		}
+		return min;
+	}
+}
+
+inline double sum(double *x, double *y, double f(double, const std::vector<double> &),
+	const std::function<double(double, std::vector<double> &)> &f_1,
+	std::vector<double> &params)
+{
+	double res = 0;
+	for (int i = 0; i < N; i++)
+	{
+		res += (f(x[i], params) - y[i]) * f_1(x[i], params);
+	}
+	return res * inverse_N * 0.5;
+}
+
+class derivative
+{
+private:
+	std::function<double(double, std::vector<double> &)> _f;
+
+public:
+	std::vector<std::function<double(double, std::vector<double> &)>> all_func;
+
+	derivative(double f(double, const std::vector<double> &),
+		std::vector<double> &params)
+		: _f{ f }
+	{
+		//std::cout << "why multiple times? " << std::endl;
+		for (int i = 0; i < params.size(); ++i)
+		{
+			all_func.emplace_back([i, this](double x0, std::vector<double> &parameter) {
+				double delta = 1e-5 * parameter[i] == 0.0 ? 1e-5 : parameter[i];
+				double y0 = _f(x0, parameter);
+				parameter[i] += delta;
+				double y1 = _f(x0, parameter);
+				parameter[i] -= delta;
+				//  std::cout << "HERE: " << x0 << " " << y0 << " " << y1 << std::endl;
+				double ret = (y1 - y0) / delta;
+				if (mynan(ret))
+				{
+					std::ostringstream oss(std::ostringstream::ate);
+					oss << "In function '" << __FUNCTION__
+						<< " ' the derivative is NaN." << std::endl
+						<< "y1- y0: " << (y1 - y0) << "  delta: " << delta << std::endl;
+					oss << "y1: " << y1 << " y0: " << y0 << std::endl;
+					oss << "x0: " << x0 << std::endl;
+					for_each(parameter.begin(), parameter.end(), [&oss](double i) {
+						oss << i << std::endl;
+					});
+					Print::frame(oss.str(), log_helper::f_log);
+					exit(-1);
+				}
+
+				if (myinf(ret))
+				{
+					log_helper::f_log << "In function '" << __FUNCTION__
+						<< " ' the derivative is 'inf'." << std::endl;
+					exit(-1);
+				}
+				return ret;
+			});
+		}
+	}
+};
+
+
+inline double get_fit_once_err(double *x, double *y,
+	double f(double, const std::vector<double> &),
+	std::vector<double> params, int N)
+{
+	double this_err = 0.0;
+	//std::ostringstream oss;
+	for (int i = 0; i < N; ++i)
+	{
+		this_err += pow(f(x[i], params) - y[i], 2.0);
+
+		//oss << pow(f(x[i], params) - y[i], 2.0) << std::endl;
+		//oss << f(x[i], params) << "  " << y[i] << "  " <<pow(f(x[i], params) - y[i], 2.0) <<std::endl;
+	}
+	//oss << sqrt(this_err / N);
+	//Print::frame(oss.str());
+	return sqrt(this_err * inverse_N);
+}
+
+double alpha = 1.0;
+
+inline double fit_once(double *x, double *y, double f(double, const std::vector<double> &),
+	std::vector<double> &params, const derivative &all_derivative_func, bool any)
+{
+	auto fu = std::async(std::launch::async, std::ref(get_fit_once_err), x, y,
+		std::ref(f), params, N);
+	double record_sum;
+	double _max_; //for change alpha if alpha is too small
+	for (int i = 0; i < params.size(); ++i)
+	{
+		record_sum = sum(x, y, f, all_derivative_func.all_func[i], params);
+		if (mynan(record_sum))
+		{
+			std::ostringstream oss{ std::ostringstream::app };
+			oss << "record_sum is NaN, \n"
+				<< "line number: " << __LINE__ << std::endl;	
+			Print::frame(oss.str(), log_helper::f_log);
+			exit(-1);
+		}
+		velocity[i] = alpha * record_sum + 0.9 * velocity[i];
+	}
+
+	/*if (abs(velocity[0])< 1e-7 && abs(velocity[0]) != 0.0
+		&& (_max_ = _helper::find_max(velocity)) < 1e-7)
+	{
+		alpha *= (1e-7 / _max_);
+		if (mynan(alpha))
+		{
+			log_helper::f_log << "In function: '" << __FUNCTION__ 
+				<< " ', 'Alpha' turn into a NaN, line number: " 
+				<< __LINE__ << std::endl;
+			exit(-1);
+		}
+
+		if (myinf(alpha))
+		{
+			log_helper::f_log << "In function '" << __FUNCTION__
+				<< " ' alpha is 'inf'." << std::endl;
+			exit(-1);
+		}
+	}*/
+	//just for bound the parameters
+	if (alpha == 1.0)
+	{
+		double change = sqrt(std::accumulate(velocity.begin(), velocity.end(), 0.0,
+			[](double x, double y) {
+			return x + pow(y, 2.0);
+		}));
+
+		alpha = 0.1 * _helper::find_min(params) / change;
+		// std::cout << "min: "<< find_min(params)<< std::endl;
+		std::cout << "alpha: " << alpha << std::endl;
+	}
+
+	for (int i = 0; i < params.size(); ++i)
+	{
+		params[i] -= velocity[i];
+		if (any == false)
+		{
+			switch (i)
+			{
+			case 0:
+				if (params[i] < 0.1)
+					params[i] = 0.1;
+				else if (params[i] > 0.45)
+					params[i] = 0.45;
+				break;
+			case 3:
+				if (params[i] < 0.05)
+					params[i] = 0.05;
+				else if (params[i] > 2)
+					params[i] = 2;
+				break;
+			default:
+				if (params[i] < 0.35)
+					params[i] = 0.35;
+				else if (params[i] > 0.985)
+					params[i] = 0.985;
+				else if (mynan(params[i]))
+				{
+					std::ostringstream oss{ std::ostringstream::ate };
+					oss << "params: " << params[i] << " is NaN" << std::endl;
+					Print::frame(oss.str(), log_helper::f_log);
+				}
+
+				break;
+			}
+		}
+	}
+
+	//    for (int i = 0; i < params.size(); ++i)
+	//    {
+	//        std::cout << velocity[i] << "  ";
+	//    }
+	//    std::cout << std::endl;
+
+	return fu.get();
+}
+
+
+
+void fit(double *x, double *y, double f(double, const std::vector<double> &),
+	std::vector<double> &params, int max_time, bool any)
+{
+	std::ofstream fout{ "/home/wwc129/test/fit_result.dat", std::ios_base::out };
+	for (int i = 0; i < params.size(); ++i)
+	{
+		velocity.emplace_back(0.0);
+	}
+	derivative all_derivative_func(f, params);
+	unsigned fit_times = 0;
+	double res_fit_once;
+	do
+	{
+		res_fit_once = fit_once(x, y, f, params, all_derivative_func, any);
+		if (fit_times % 100 == 0)
+		{
+			std::cout << "process: %" << (float)fit_times / max_time * 100 << std::endl;
+		}
+
+		fout << fit_times << " :     ";
+		fout.precision(8);
+		fout.setf(std::ios_base::fixed, std::ios_base::floatfield);
+		for (int i = 0; i < params.size(); ++i)
+		{
+			fout << params[i] << " ,  ";
+		}
+		fout << "err (sqrt / N):  " << std::scientific << res_fit_once << std::endl;
+		fout.flush();
+		//        std::cout<<res_fit_once<<std::endl;
+		//        std::cout<<std::endl;
+	} while (++fit_times < max_time && res_fit_once > err);
+
+
+	fout.close();
+}
+
